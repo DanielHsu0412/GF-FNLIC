@@ -2,7 +2,7 @@
 
 This repository contains code for reproducing results in the CVPR2025 paper *Fitted Neural Lossless Image Compression*.
 
-FNLIC paper links: [cvf]</p>
+FNLIC paper links: [cvf](https://openaccess.thecvf.com/content/CVPR2025/html/Zhang_Fitted_Neural_Lossless_Image_Compression_CVPR_2025_paper.html)</p>
 
 ![framework](./assets/overview.png)
 
@@ -78,6 +78,7 @@ Use `python test_inf_time.py -h` to see the detailed options.
     booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)},
     month     = {June},
     year      = {2025},
+    pages     = {23249-23258}
 }
 ```
 
