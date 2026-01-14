@@ -18,21 +18,18 @@ class OverfitterParameter():
     img_shape: Tuple[int, int]
 
     # ----- Architecture options
-    layers_synthesis: List[str]         # Synthesis architecture (e.g. '12-1-linear-relu', '12-1-residual-relu', '3-1-linear-relu', '3-3-residual-none')
-    layers_arm: List[int]               # Output dim. of each hidden layer for the ARM (Empty for linear MLP)
-    n_latents:int         # Number of latents for each resolution.
-    upsampling_kernel_size: int = 8     # Kernel size for the upsampler ≥8. if set to zero the kernel is not optimised, the bicubic upsampler is used
+    layers_synthesis: List[str]         # Synthesis architecture (e.g. '12-1-linear-relu')
+    layers_arm: List[int]               # Output dim. of each hidden layer for the ARM
+    n_latents: int                      # Number of latents for each resolution.
+    upsampling_kernel_size: int = 8     # Kernel size for the upsampler
     img_bitdepth: int = 8               # Bitdepth of the input image
     latent_bitdepth: int = 6            # Bitdepth of the latent variables
     freq_precision: int = 15            # Precision of the frequency
     latent_freq_precision: int = 12
-    # ==================== Not set by the init function ===================== #
 
     def pretty_string(self) -> str:
-        """Return a pretty string formatting the data within the class"""
         ATTRIBUTE_WIDTH = 25
         VALUE_WIDTH = 80
-
         s = 'OverfitterParameter value:\n'
         s += '-------------------------------\n'
         for k in fields(self):
@@ -42,14 +39,14 @@ class OverfitterParameter():
 
 class OverFitter(nn.Module):
 
-    def __init__(self, param:OverfitterParameter, alpha_init:float=1.) -> None:
+    def __init__(self, param: OverfitterParameter, alpha_init: float = 1.) -> None:
         super().__init__()
         self.param = param
 
         # regarding image configuration
         self.img_shape = param.img_shape
-        h,w = self.img_shape      
-        self.img_size = np.prod(param.img_shape)*3
+        h, w = self.img_shape      
+        self.img_size = np.prod(param.img_shape) * 3
         self.bitdepth = param.img_bitdepth
         self.freq_precision = param.freq_precision
 
@@ -62,37 +59,47 @@ class OverFitter(nn.Module):
         self.ste_quantizer = STEQuantizer()
         self.encoder_gains = th.ones(param.n_latents,) * 64
         padding = 1 << (self.n_latents - 1)
-        h = (h//padding) * padding + padding * (h % padding > 0)
-        w = (w//padding) * padding + padding * (w % padding > 0)
+        h = (h // padding) * padding + padding * (h % padding > 0)
+        w = (w // padding) * padding + padding * (w % padding > 0)
         for i in range(param.n_latents):
-            self.latents.append(nn.Parameter(th.zeros(1, 1, h//(2**i), w//(2**i))))
+            self.latents.append(nn.Parameter(th.zeros(1, 1, h // (2**i), w // (2**i))))
         self.upsampling = Upsampling(param.upsampling_kernel_size)
 
         # regarding the ARM and the synthesis
         self.arm = Arm(2, param.layers_arm)
         non_zero_pixel_ctx_index = [1, 3]
         self.non_zero_pixel_ctx_index = th.tensor(non_zero_pixel_ctx_index)
-        self.synthesis = Synthesis(param.n_latents, param.layers_synthesis)
+        
+        # [MODIFIED] 修改 Synthesis 的最後一層以支援 Dual-head (Feature + Gate)
+        # 我們複製一份設定，以免影響原始 param
+        synthesis_layers_cfg = list(param.layers_synthesis)
+        
+        # 解析最後一層設定字串 (格式通常為: "out_ch-kernel-mode-act")
+        last_layer_cfg = synthesis_layers_cfg[-1]
+        out_ch_str, k_str, mode_str, act_str = last_layer_cfg.split('-')
+        
+        # 將輸出通道數加倍 (9 -> 18)
+        # 一半用於 theta_overfit，一半用於 gate
+        new_out_ch = int(out_ch_str) * 2
+        
+        # 更新設定字串
+        synthesis_layers_cfg[-1] = f"{new_out_ch}-{k_str}-{mode_str}-{act_str}"
+        print(f"[*] OverFitter: Synthesis output doubled for Gated Fusion ({out_ch_str} -> {new_out_ch})")
+        
+        # 使用修改後的設定初始化 Synthesis
+        self.synthesis = Synthesis(param.n_latents, synthesis_layers_cfg)
 
         # regarding the scale of prior parameters
-        self.coefficients = nn.ParameterList([nn.Parameter(alpha_init*th.ones(1,9,1,1).float()) for _ in range(4)])
+        # self.a (Scale Map) 已經被移除，取而代之的是上面的 Gated Synthesis
+        self.coefficients = nn.ParameterList([nn.Parameter(alpha_init * th.ones(1, 9, 1, 1).float()) for _ in range(4)])
         self.modules_to_send = [tmp.name for tmp in fields(DescriptorOverfitter)]
 
-    def modify_prior(self, prior:th.Tensor):
+    def modify_prior(self, prior: th.Tensor):
         priors = th.chunk(space2depth(prior), 4, dim=1)
         priors = [prior * coeff for prior, coeff in zip(priors, self.coefficients)]
         return depth2space(th.cat(priors, dim=1))
 
-    def get_quantized_latent(self, use_ste_quant: bool=False) -> List[Tensor]:
-        """
-        Args:
-            use_ste_quant (bool, optional): True to use the straight-through estimator for
-                quantization. Defaults to True.
-
-        Returns:
-            List[Tensor]: List of [1, C, H', W'] latent variable with H' and W' depending
-                on the particular resolution of each latent.
-        """
+    def get_quantized_latent(self, use_ste_quant: bool = False) -> List[Tensor]:
         scaled_latent = [
             cur_latent * self.encoder_gains[i] for i, cur_latent in enumerate(self.latents)
         ]
@@ -105,7 +112,6 @@ class OverFitter(nn.Module):
         else:
             sent_latent = [th.round(cur_latent) for cur_latent in scaled_latent]
 
-        # Clamp latent if we need to write a bitstream
         sent_latent = [
             th.clamp(cur_latent, -self.latent_max_val, self.latent_max_val) for cur_latent in sent_latent
         ]
@@ -113,28 +119,17 @@ class OverFitter(nn.Module):
         return sent_latent
 
     def get_network_rate(self) -> DescriptorOverfitter:
-        """Return the rate (in bits) associated to the parameters (weights and biases)
-        of the different modules
-
-        Returns:
-            DescriptorOverfitter: The rate (in bits) associated with the weights and biases of each module
-        """
         rate_per_module: DescriptorOverfitter = {
             module_name: {'weight': 0., 'bias': 0.} for module_name in self.modules_to_send
         }
 
         for module_name in self.modules_to_send:
+            # 這裡會自動計算到 Synthesis 中變大的那一層 (包含 Gate 的權重)
             rate_per_module[module_name] = getattr(self, module_name).measure_laplace_rate()
 
         return rate_per_module
 
     def get_network_quantization_step(self) -> DescriptorOverfitter:
-        """Return the quantization step associated to the parameters (weights and biases)
-        of the different modules
-
-        Returns:
-            DescriptorOverfitter: The quantization step associated with the weights and biases of each module
-        """
         q_step_per_module: DescriptorOverfitter = {
             module_name: {'weight': 0., 'bias': 0.} for module_name in self.modules_to_send
         }
@@ -145,35 +140,61 @@ class OverFitter(nn.Module):
         return q_step_per_module
 
     def forward(self, 
-                img_t:Tensor, 
-                prior:Tensor,
-                use_ste_quant:bool=False)->OrderedDict:
-        prior = self.modify_prior(prior)
+                img_t: Tensor, 
+                prior: Tensor,
+                use_ste_quant: bool = False) -> OrderedDict:
+        
+        # 1. 準備 Prior Feature (theta_pre)
+        theta_pre = self.modify_prior(prior)
+        
+        # 2. 準備 Latents
         latents = self.get_quantized_latent(use_ste_quant)
         latent_flat, context_flat = get_flat_latent_and_context(latents, 3, self.non_zero_pixel_ctx_index)
         latent_flat = latent_flat.unsqueeze(1)
-        params = self.arm(context_flat)
-        latent_rate  = get_latent_rate(latent_flat, params, self.latent_bitdepth, self.param.latent_freq_precision).sum()
+        params_arm = self.arm(context_flat)
+        latent_rate = get_latent_rate(latent_flat, params_arm, self.latent_bitdepth, self.param.latent_freq_precision).sum()
+        
+        # 3. 執行 Synthesis (雙頭輸出)
         latent_prior = self.upsampling(latents)
+        synthesis_out = self.synthesis(latent_prior) # 這裡現在有 18 個通道
+        
+        # [MODIFIED] 4. 切分特徵與門控 (Dual-head Split)
+        # 假設 output channel = 18, 則 theta_overfit=9, raw_gate=9
+        theta_overfit, raw_gate = th.chunk(synthesis_out, 2, dim=1)
+        
+        # 5. 計算門控值 (Sigmoid)
+        gate = th.sigmoid(raw_gate)
+        
+        # [MODIFIED] 6. 執行門控融合 (Gated Fusion)
+        # 使用您指定的公式: theta = gate * theta_pre + (1 - gate) * theta_overfit
+        # gate 接近 1 時依賴 Pre-fit (Prior)
+        # gate 接近 0 時依賴 Overfit
+        params = gate * theta_pre + (1 - gate) * theta_overfit
 
-        params = self.synthesis(latent_prior) + prior
-        latent_bpd = latent_rate/self.img_size
+        latent_bpd = latent_rate / self.img_size
         img_rates = weak_colorar_rate(params, img_t, self.bitdepth, self.freq_precision)
-        img_bpd = img_rates.sum()/self.img_size
+        img_bpd = img_rates.sum() / self.img_size
       
         return OrderedDict(
             latent_bpd=latent_bpd,
             img_bpd=img_bpd,
-            loss = latent_bpd + img_bpd
+            loss=latent_bpd + img_bpd
         )
     
     @th.no_grad()
-    def get_delta(self)->Tensor:
+    def get_delta(self) -> Tensor:
+        # [MODIFIED] 用於視覺化修正量
         latents = self.get_quantized_latent()
         synthesis_input = self.upsampling(latents)
-        return self.synthesis(synthesis_input)
+        synthesis_out = self.synthesis(synthesis_input)
+        
+        theta_overfit, raw_gate = th.chunk(synthesis_out, 2, dim=1)
+        gate = th.sigmoid(raw_gate)
+        
+        # 回傳過擬合部分對最終結果的貢獻 ( weighted by (1-gate) )
+        return (1 - gate) * theta_overfit
 
-    def to_device(self, device:th.device)->None:
+    def to_device(self, device: th.device) -> None:
         self.to(device)
         self.non_zero_pixel_ctx_index = self.non_zero_pixel_ctx_index.to(device)
         self.encoder_gains = self.encoder_gains.to(device)
@@ -188,15 +209,25 @@ class OverFitter(nn.Module):
                     self.arm.mlp[idx_layer].qb = layer.qb.to(device)
                     
     @th.no_grad()
-    def inference_for_decode(self, x:Tensor, prior:Tensor, max_latent_v:int)->None:
-        symbols = th.arange(-max_latent_v, max_latent_v+1, 1.0).to(x.device)
+    def inference_for_decode(self, x: Tensor, prior: Tensor, max_latent_v: int) -> None:
+        # [MODIFIED] 推理邏輯更新
+        symbols = th.arange(-max_latent_v, max_latent_v + 1, 1.0).to(x.device)
         symbols_2d = th.cartesian_prod(symbols, symbols).float()
         latent_params = self.arm(symbols_2d)
         latents = self.get_quantized_latent()
         latent_prior = self.upsampling(latents)
-        params = self.synthesis(latent_prior) + self.modify_prior(prior)
+        
+        # 取得雙頭輸出
+        synthesis_out = self.synthesis(latent_prior)
+        theta_overfit, raw_gate = th.chunk(synthesis_out, 2, dim=1)
+        
+        # 融合
+        gate = th.sigmoid(raw_gate)
+        theta_pre = self.modify_prior(prior)
+        
+        params = gate * theta_pre + (1 - gate) * theta_overfit
     
-    def save(self, path:str)->None:
+    def save(self, path: str) -> None:
         self.eval()
         with th.no_grad():
             quant_latents_list = self.get_quantized_latent()
@@ -210,7 +241,9 @@ class OverFitter(nn.Module):
         }
         th.save(save_dict, path)
     
-    def load(self, path:str)->None:
+    def load(self, path: str) -> None:
+        # 載入時，由於我們在 __init__ 已經動態加大了 synthesis 的層
+        # 所以 load_state_dict 會自動匹配到正確的大小，無需額外修改
         load_dict = th.load(path)
         self.arm = load_dict['arm']
         self.upsampling = load_dict['upsampling']
@@ -218,4 +251,4 @@ class OverFitter(nn.Module):
         self.coefficients = load_dict['coefficients']
 
         quant_latents_uint8 = load_dict['quant_latents_uint8']
-        self.latents = nn.ParameterList([nn.Parameter((quant_latents_uint8[i].float() - self.latent_max_val)/self.encoder_gains[i]) for i in range(self.n_latents)])
+        self.latents = nn.ParameterList([nn.Parameter((quant_latents_uint8[i].float() - self.latent_max_val) / self.encoder_gains[i]) for i in range(self.n_latents)])
