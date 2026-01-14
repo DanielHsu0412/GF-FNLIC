@@ -1,6 +1,8 @@
-# FNLIC (Fitted Neural Lossless Image Compression)
+# Acknowledgement
 
-This repository contains code for reproducing results in the CVPR2025 paper *Fitted Neural Lossless Image Compression*.
+This repository is forked from https://github.com/ZZ022/FNLIC/tree/main
+
+I have modified overfitter.py for our class project.
 
 FNLIC paper links: [cvf](https://openaccess.thecvf.com/content/CVPR2025/html/Zhang_Fitted_Neural_Lossless_Image_Compression_CVPR_2025_paper.html)</p>
 
