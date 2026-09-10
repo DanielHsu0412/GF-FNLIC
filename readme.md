@@ -3,6 +3,7 @@
 This repository is forked from https://github.com/ZZ022/FNLIC/tree/main
 
 I have modified overfitter.py for our class project.
+
 My Contributions
 -Implemented and evaluated the GF-FNLIC model modifications.
 -Proposed and implemented a Partial Update Strategy.
