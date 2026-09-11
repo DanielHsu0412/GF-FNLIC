@@ -2,17 +2,20 @@
 
 This repository is forked from https://github.com/ZZ022/FNLIC/tree/main
 
-I have modified overfitter.py for our class project.
+I modified `src/models/overfitter.py` and `src/encode.py` for our project.
 
-My Contributions  
+## My Contributions
 
--Implemented and evaluated the GF-FNLIC model modifications.  
-
--Proposed and implemented a Partial Update Strategy.  
-
--Reduced encoding time by approximately 12% in experiments.  
-
--Conducted experiments and performance analysis on the Kodak dataset.  
+- Modified overfitter.py to implement the Gated Fusion mechanism in PyTorch.
+ 
+- Modified encode.py to implement the proposed Partial Update Strategy.
+  
+- Reduced encoding time by approximately 12% compared with Full Optimization.
+  
+- Reduced Latent BPD by approximately 6.25% with Gated Fusion.
+  
+- Conducted experiments and performance analysis on the Kodak dataset.
+  
 
 
 FNLIC paper links: [cvf](https://openaccess.thecvf.com/content/CVPR2025/html/Zhang_Fitted_Neural_Lossless_Image_Compression_CVPR_2025_paper.html)</p>
